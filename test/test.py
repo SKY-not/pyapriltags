@@ -2,7 +2,7 @@ from pyapriltags import Detector
 import numpy
 import os
 
-test_images_path = 'test_files'
+test_images_path = 'test/test_files'
 
 visualization = False
 try:
@@ -31,7 +31,8 @@ at_detector = Detector(families='tag36h11',
                        debug=0)
 
 with open(test_images_path + '/test_info.yaml', 'r') as stream:
-    parameters = yaml.load(stream)
+    # parameters = yaml.load(stream)
+    parameters = yaml.safe_load(stream)
 
 #### test WITH THE SAMPLE IMAGE ####
 
@@ -76,7 +77,7 @@ print("\n\nTESTING WITH ROTATION IMAGES")
 time_num = 0
 time_sum = 0
 
-test_images_path = 'test_files'
+# test_images_path = 'test_files'
 image_names = parameters['rotation_test']['files']
 
 for image_name in image_names:
@@ -97,7 +98,7 @@ for image_name in image_names:
 
     time_sum+=time.time()-start
     time_num+=1
-
+    print(time_num)
     print(tags[0].pose_t, parameters['rotation_test']['posx'], parameters['rotation_test']['posy'], parameters['rotation_test']['posz'])
     print(tags[0].pose_R, parameters['rotation_test']['rotx'], parameters['rotation_test']['roty'], parameters['rotation_test']['rotz'])
 
