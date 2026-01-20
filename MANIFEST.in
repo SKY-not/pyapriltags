@@ -1,0 +1,4 @@
+include pyapriltags/libapriltag.so
+include pyapriltags/libapriltag.dylib
+include pyapriltags/libapriltag.dll
+include pyapriltags/py.typed
