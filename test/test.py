@@ -4,7 +4,7 @@ import os
 
 test_images_path = 'test/test_files'
 
-visualization = False
+visualization = True
 try:
     import cv2
 except:
@@ -41,6 +41,7 @@ print("\n\nTESTING WITH A SAMPLE IMAGE")
 img = cv2.imread(test_images_path+'/'+parameters['sample_test']['file'], cv2.IMREAD_GRAYSCALE)
 cameraMatrix = numpy.array(parameters['sample_test']['K']).reshape((3,3))
 camera_params = ( cameraMatrix[0,0], cameraMatrix[1,1], cameraMatrix[0,2], cameraMatrix[1,2] )
+# fx, fy, cx, cy
 
 if visualization:
     cv2.imshow('Original image',img)
