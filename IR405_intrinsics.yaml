@@ -1,0 +1,24 @@
+camera:
+  model: pinhole
+  resolution:
+    width: 1280
+    height: 720
+  intrinsics:
+    fx: 645.2243041992188
+    fy: 644.3118896484375
+    cx: 633.8898315429688
+    cy: 360.0555419921875
+  distortion:
+    model: distortion.inverse_brown_conrady
+    coeffs:
+    - k1
+    - k2
+    - p1
+    - p2
+    - k3
+    values:
+    - -0.05372624471783638
+    - 0.05638597533106804
+    - 0.000343952386174351
+    - 0.0005959899281151593
+    - -0.01772184669971466
