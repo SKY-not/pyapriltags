@@ -37,7 +37,7 @@ except Exception:
     raise RuntimeError('No apriltag detector installed. Install `pyapriltags`.')
 
 
-def load_intrinsics(path):
+def load_intrinsics(path: str):
     with open(path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f)
     cm = np.array(data.get('camera_matrix', data.get('cameraMatrix', [])), dtype=np.float64)
@@ -47,21 +47,27 @@ def load_intrinsics(path):
     return cm, dist.ravel() if dist.size else np.zeros((5,)), (w, h)
 
 
-def build_detector(family='tag36h11'):
+def build_detector(family:str='tag36h11'):
     if _detector_impl == 'pyapriltag' and _pyapriltag is not None:
         det = _pyapriltag.Detector()
         return ('pyapriltag', det)
     raise RuntimeError('No apriltag detector installed. Install `pyapriltag`.')
 
 
-def detect_tags(detector_tuple, gray):
+def detect_tags(detector_tuple: tuple, gray: np.ndarray, cam_mtx: np.ndarray=None, tag_size: float=None):
+    """
+    Detect AprilTags and return unified detections including pose if available.
+    """
     impl, det = detector_tuple
-    results = det.detect(gray)
+    fx = cam_mtx[0,0]
+    fy = cam_mtx[1,1]
+    cx = cam_mtx[0,2]
+    cy = cam_mtx[1,2]
+    results = det.detect(gray, estimate_tag_pose=True, camera_params=(fx,fy,cx,cy), tag_size=tag_size)
     detections = []
+
     for r in results:
-        # corners may be attribute or key depending on implementation
         corners = None
-        tag_id = None
         if hasattr(r, 'corners'):
             corners = np.array(r.corners, dtype=np.float32)
         elif isinstance(r, dict):
@@ -75,6 +81,11 @@ def detect_tags(detector_tuple, gray):
             except Exception:
                 corners = None
 
+        if corners is None:
+            continue
+        corners = corners.reshape((4,2))
+
+        tag_id = None
         if hasattr(r, 'tag_id'):
             tag_id = int(getattr(r, 'tag_id'))
         elif hasattr(r, 'id'):
@@ -82,47 +93,23 @@ def detect_tags(detector_tuple, gray):
         elif isinstance(r, dict):
             tag_id = int(r.get('id', r.get('tag_id', -1)))
 
-        if corners is None:
-            continue
-        corners = corners.reshape((4,2))
-        detections.append({'id': int(tag_id), 'corners': corners})
+        rvec = None
+        tvec = None
+        if hasattr(r, 'rvec') and hasattr(r, 'tvec'):
+            rvec = np.array(r.rvec, dtype=np.float32).reshape(3,)
+            tvec = np.array(r.tvec, dtype=np.float32).reshape(3,)
+        elif hasattr(r, 'pose_R') and hasattr(r, 'pose_t'):
+            rvec, _ = cv2.Rodrigues(np.array(r.pose_R, dtype=np.float32))
+            tvec = np.array(r.pose_t, dtype=np.float32).reshape(3,)
+
+        detections.append({
+            'id': int(tag_id),
+            'corners': corners,
+            'rvec': rvec,
+            'tvec': tvec
+        })
+
     return detections
-
-
-def estimate_pose_and_reproj(tag_corners, cam_mtx, tag_size_m, dist=np.zeros((5,))):
-    # tag_corners: 4x2 array in image coordinates. We assume order corresponds to
-    # tag's corners: (top-left, top-right, bottom-right, bottom-left) but solvePnP
-    # works regardless if the order matches the object points order.
-    s = float(tag_size_m)
-    obj_pts = np.array([[-s/2, -s/2, 0.0],
-                        [ s/2, -s/2, 0.0],
-                        [ s/2,  s/2, 0.0],
-                        [-s/2,  s/2, 0.0]], dtype=np.float32)
-    img_pts = tag_corners.reshape((4,2)).astype(np.float32)
-    # Attempt solvePnP
-    ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, cam_mtx, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-    if not ok:
-        ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, cam_mtx, dist, flags=cv2.SOLVEPNP_ITERATIVE)
-    proj_pts, _ = cv2.projectPoints(obj_pts, rvec, tvec, cam_mtx, dist)
-    proj_pts = proj_pts.reshape((-1,2))
-    err = np.sqrt(np.mean(np.sum((proj_pts - img_pts)**2, axis=1)))
-    return rvec.reshape(3,), tvec.reshape(3,), float(err)
-
-def get_transformation_matrix(rvec, tvec):
-    # 1. 将旋转向量 (3x1) 转换为旋转矩阵 (3x3)
-    rmat, _ = cv2.Rodrigues(rvec)
-    
-    # 2. 创建 4x4 的单位矩阵
-    T = np.eye(4)
-    
-    # 3. 将旋转矩阵填入左上角 3x3 区域
-    T[:3, :3] = rmat
-    
-    # 4. 将平移向量填入右上角 3x1 区域
-    # 确保 tvec 是 (3,) 或 (3,1) 形状
-    T[:3, 3] = tvec.reshape(3)
-    
-    return T
 
 def main():
     parser = argparse.ArgumentParser()
@@ -130,6 +117,7 @@ def main():
     parser.add_argument('--tag-size', type=float, default=0.01, help='Tag size in meters')
     parser.add_argument('--tag-family', default='tag36h11', help='AprilTag family')
     parser.add_argument('--once', action='store_true', help='Capture a single frame and exit')
+    # default='imgs'
     parser.add_argument('--images', help='If set, process images from this folder instead of RealSense')
     parser.add_argument('--out', default='out_vis', help='Output folder when processing images')
     args = parser.parse_args()
@@ -161,22 +149,51 @@ def main():
                 continue
             und = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR)
             gray = cv2.cvtColor(und, cv2.COLOR_BGR2GRAY)
-            detections = detect_tags(detector, gray)
+            detections = detect_tags(detector, gray, cam_mtx=cam_mtx, tag_size=args.tag_size)
             out = und.copy()
             per_image = {'file': os.path.basename(img_path), 'detections': []}
+
             for det in detections:
                 corners = det['corners']
-                pts = corners.astype(np.int32).reshape((-1,1,2))
-                cv2.polylines(out, [pts], True, (0,255,0), 2)
-                try:
-                    rvec, tvec, reproj = estimate_pose_and_reproj(corners, cam_mtx, args.tag_size)
-                except Exception as e:
-                    print('pose failed', det.get('id'), 'err', e)
+                pts = corners.astype(np.int32).reshape((-1, 1, 2))
+                cv2.polylines(out, [pts], True, (0, 255, 0), 2)
+
+                # 使用Detection自带的位姿
+                rvec = det['rvec']
+                tvec = det['tvec']
+
+                # 如果Detection里没有rvec/tvec，跳过
+                if rvec is None or tvec is None:
+                    print('pose missing for tag', det['id'])
                     continue
+
+                # 重投影误差计算
+                proj_pts, _ = cv2.projectPoints(
+                    np.array([[-args.tag_size/2, args.tag_size/2, 0],
+                            [ args.tag_size/2, args.tag_size/2, 0],
+                            [ args.tag_size/2,  -args.tag_size/2, 0],
+                            [-args.tag_size/2,  -args.tag_size/2, 0]], dtype=np.float32),
+                    rvec,
+                    tvec,
+                    cam_mtx,
+                    np.zeros((5,))
+                )
+                proj_pts = proj_pts.reshape((-1, 2))
+                reproj = float(np.sqrt(np.mean(np.sum((proj_pts - corners)**2, axis=1))))
+
+                # 在图像上标注
                 cxy = tuple(corners.mean(axis=0).astype(int).tolist())
                 text = f"id={det['id']} reproj={reproj:.2f}px"
-                cv2.putText(out, text, (cxy[0]-50, cxy[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
-                per_image['detections'].append({'id': int(det['id']), 'rvec': rvec.tolist(), 'tvec': tvec.tolist(), 'reproj_px': reproj})
+                cv2.putText(out, text, (cxy[0]-50, cxy[1]-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                # 保存信息
+                per_image['detections'].append({
+                    'id': int(det['id']),
+                    'rvec': rvec.tolist(),
+                    'tvec': tvec.tolist(),
+                    'reproj_px': reproj
+                })
                 print(f"{os.path.basename(img_path)}: Tag {det['id']} rvec={rvec.tolist()} tvec={tvec.tolist()} reproj_px={reproj:.3f}")
             out_path = os.path.join(out_dir, os.path.basename(img_path))
             cv2.imwrite(out_path, out)
@@ -200,11 +217,28 @@ def main():
         # fallback to default
         cfg.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
     profile = pipe.start(cfg)
+    device = profile.get_device()
+    color_sensor = None
+    for s in device.sensors:
+        if s.supports(rs.option.enable_auto_exposure):
+            color_sensor = s
+            break
+    if color_sensor is None:
+        raise RuntimeError("No color sensor found")
+    if color_sensor.supports(rs.option.enable_auto_exposure):
+        color_sensor.set_option(rs.option.enable_auto_exposure, 1)
+    pipe.stop()
+    time.sleep(0.5)
+    pipe.start(cfg)
+
+    print("[INFO] Restored auto exposure (default)")
+    # 等待自动曝光稳定
+    for _ in range(30):
+        pipe.wait_for_frames()
 
     try:
         # prepare undistort maps
         map1, map2 = cv2.initUndistortRectifyMap(cam_mtx, dist, None, cam_mtx, (w,h), cv2.CV_32FC1)
-
         while True:
             frames = pipe.wait_for_frames()
             color = frames.get_color_frame()
@@ -214,30 +248,36 @@ def main():
             und = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR)
             gray = cv2.cvtColor(und, cv2.COLOR_BGR2GRAY)
 
-            detections = detect_tags(detector, gray)
+            detections = detect_tags(detector, gray, cam_mtx=cam_mtx, tag_size=args.tag_size)
             out = und.copy()
             for det in detections:
                 corners = det['corners']  # shape (4,2)
-                # draw
                 pts = corners.astype(np.int32).reshape((-1,1,2))
                 cv2.polylines(out, [pts], True, (0,255,0), 2)
-                # estimate pose
-                try:
-                    rvec, tvec, reproj = estimate_pose_and_reproj(corners, cam_mtx, args.tag_size)
-                except Exception as e:
-                    print('pose failed for id', det.get('id'), 'err', e)
+                
+                rvec = det['rvec']
+                tvec = det['tvec']
+                if rvec is None or tvec is None:
+                    print('pose missing for tag', det['id'])
                     continue
-                # Draw id and error
+
+                obj_pts = np.array([[-args.tag_size/2, args.tag_size/2, 0],
+                                    [ args.tag_size/2, args.tag_size/2, 0],
+                                    [ args.tag_size/2, -args.tag_size/2, 0],
+                                    [-args.tag_size/2, -args.tag_size/2, 0]], dtype=np.float32)
+                proj_pts, _ = cv2.projectPoints(obj_pts, rvec, tvec, cam_mtx, np.zeros((5,)))
+                proj_pts = proj_pts.reshape((-1,2))
+                reproj = float(np.sqrt(np.mean(np.sum((proj_pts - corners)**2, axis=1))))
+
                 cxy = tuple(corners.mean(axis=0).astype(int).tolist())
-                text = f"id={det['id']} reproj={reproj:.2f}m"
-                cv2.putText(out, text, (cxy[0]-50, cxy[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-                # print pose
+                text = f"id={det['id']} reproj={reproj:.2f}px"
+                cv2.putText(out, text, (cxy[0]-50, cxy[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+
                 print(f"Tag {det['id']}: rvec={rvec.tolist()} tvec={tvec.tolist()} reproj_px={reproj:.3f}")
 
             cv2.imshow('undistorted', out)
             key = cv2.waitKey(1) & 0xFF
             if args.once:
-                # save image and break
                 ts = int(time.time())
                 cv2.imwrite(f'apriltag_capture_{ts}.png', out)
                 break
